@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: imax-70mm-monitor
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+    startCommand: python monitor.py
+    envVars:
+      - key: GMAIL_USER
+        sync: false          # set manually in Render dashboard
+      - key: GMAIL_APP_PASSWORD
+        sync: false          # set manually in Render dashboard
+      - key: ALERT_EMAIL
+        value: henry10greene@gmail.com
