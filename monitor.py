@@ -1,49 +1,62 @@
 #!/usr/bin/env python3
 """
-IMAX 70mm Showtime Monitor
-Watches AMC Lincoln Square 13 for Dune Part Three and The Odyssey in IMAX 70mm.
-Sends a desktop notification, email alert, and logs with timestamp on any change.
+IMAX 70mm Showtime Monitor — AMC Lincoln Square 13
+Primary:  AMC API  (https://api.amctheatres.com/v2)
+Fallback: Fandango theater page scrape (used until AMC key activates)
+Switches automatically — no code change needed when the key goes live.
 
-Environment variables (required for email):
-  GMAIL_USER         — your Gmail address used to send (e.g. you@gmail.com)
-  GMAIL_APP_PASSWORD — Gmail App Password (not your login password)
-  ALERT_EMAIL        — address to send alerts to (defaults to henry10greene@gmail.com)
+Required env vars:
+  AMC_API_KEY        — your AMC vendor key
+  GMAIL_USER         — Gmail address used to send alerts
+  GMAIL_APP_PASSWORD — Gmail App Password
+  ALERT_EMAIL        — recipient (defaults to henry10greene@gmail.com)
 """
 
-import asyncio
 import json
 import logging
 import os
+import re
 import smtplib
 import subprocess
 import sys
+import time
+from datetime import date, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+import requests
 from bs4 import BeautifulSoup
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-THEATER_SLUG = "new-york/amc-lincoln-square-13"
-BASE_URL = "https://www.amctheatres.com"
-THEATER_SHOWTIMES_URL = (
-    f"{BASE_URL}/movie-theatres/{THEATER_SLUG}"
-    "/showtimes/all-movies/today/all-auditoriums"
-)
-
-MOVIES = ["dune part three", "the odyssey"]
-FORMATS = ["imax 70mm", "imax laser at amc", "imax at amc"]  # broaden if needed
-
-CHECK_INTERVAL = 60  # seconds
-
-DIR = Path(__file__).parent
-LOG_FILE = DIR / "imax_monitor.log"
-STATE_FILE = DIR / "imax_state.json"
-
-GMAIL_USER = os.environ.get("GMAIL_USER", "")
+AMC_API_KEY     = os.environ["AMC_API_KEY"]
+GMAIL_USER      = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "henry10greene@gmail.com")
+ALERT_EMAIL     = os.environ.get("ALERT_EMAIL", "henry10greene@gmail.com")
+
+THEATRE_ID      = 164          # AMC Lincoln Square 13
+DAYS_AHEAD      = 30
+CHECK_INTERVAL  = 60           # seconds
+
+TARGET_MOVIES   = ["dune", "odyssey"]
+TARGET_FORMAT   = "imax 70mm"
+
+API_BASE        = "https://api.amctheatres.com/v2"
+AMC_HEADERS     = {"X-AMC-Vendor-Key": AMC_API_KEY}
+
+FANDANGO_URL    = "https://www.fandango.com/amc-lincoln-square-13-aabqi/theater-page"
+FANDANGO_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+DIR             = Path(__file__).parent
+LOG_FILE        = DIR / "imax_monitor.log"
+STATE_FILE      = DIR / "imax_state.json"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -51,7 +64,7 @@ handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 try:
     handlers.append(logging.FileHandler(LOG_FILE))
 except OSError:
-    pass  # read-only filesystem on some cloud envs — stdout only
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,27 +77,24 @@ log = logging.getLogger(__name__)
 # ── Alerts ────────────────────────────────────────────────────────────────────
 
 def notify_desktop(title: str, body: str) -> None:
-    """Fire notify-send — silently skipped if unavailable (e.g. on Render)."""
     try:
         subprocess.run(
             ["notify-send", "--urgency=critical", "--expire-time=10000", title, body],
-            check=True,
-            capture_output=True,
+            check=True, capture_output=True,
         )
     except Exception:
-        pass  # not available in headless/cloud environments
+        pass
 
 
 def notify_email(subject: str, body: str) -> None:
-    """Send a Gmail alert. Skipped if credentials are not configured."""
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        log.warning("Email credentials not set — skipping email alert.")
+        log.warning("Email credentials not configured — skipping email alert.")
         return
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
-        msg["From"] = GMAIL_USER
-        msg["To"] = ALERT_EMAIL
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = ALERT_EMAIL
         with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
             smtp.ehlo()
             smtp.starttls()
@@ -99,7 +109,7 @@ def alert(title: str, body: str) -> None:
     notify_desktop(title, body)
     notify_email(f"[IMAX Alert] {title}", body)
 
-# ── State persistence ─────────────────────────────────────────────────────────
+# ── State ─────────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -109,165 +119,239 @@ def load_state() -> dict:
             pass
     return {}
 
+
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2))
+    except OSError:
+        pass
 
-# ── Scraping ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def is_target_movie(title: str) -> bool:
-    t = title.lower().strip()
-    return any(m in t for m in MOVIES)
+class AMCKeyInactive(Exception):
+    """Raised when the AMC API returns 401/403 — key not yet active."""
 
-def is_imax_70mm(label: str) -> bool:
-    l = label.lower()
-    return "70mm" in l or any(f in l for f in FORMATS)
 
-async def fetch_showtimes(page) -> dict[str, list[str]]:
+def is_target_movie(name: str) -> bool:
+    return any(m in name.lower() for m in TARGET_MOVIES)
+
+
+def is_target_format(attrs: list[str]) -> bool:
+    return TARGET_FORMAT in " ".join(attrs).lower()
+
+
+# ── AMC API (primary) ─────────────────────────────────────────────────────────
+
+def _fetch_amc_date(day: date) -> list[dict]:
+    url = f"{API_BASE}/theatres/{THEATRE_ID}/showtimes/{day.isoformat()}"
+    resp = requests.get(url, headers=AMC_HEADERS, timeout=15)
+    if resp.status_code in (401, 403):
+        raise AMCKeyInactive(f"AMC API returned {resp.status_code} — key not active yet")
+    resp.raise_for_status()
+
+    hits = []
+    for st in resp.json().get("_embedded", {}).get("showtimes", []):
+        movie_name = st.get("movieName", "") or st.get("name", "")
+        attributes = st.get("attributes", [])
+        if is_target_movie(movie_name) and is_target_format(attributes):
+            hits.append({
+                "movie":    movie_name,
+                "date":     day.isoformat(),
+                "time":     st.get("showDateTime", st.get("showDateTimeUtc", "")),
+                "format":   ", ".join(attributes),
+                "purchase": st.get("purchaseUrl", ""),
+                "source":   "amc-api",
+            })
+    return hits
+
+
+def fetch_all_showtimes_amc() -> dict[str, list[dict]]:
+    """Check the next DAYS_AHEAD days via the AMC API."""
+    today = date.today()
+    results: dict[str, list[dict]] = {}
+    for offset in range(DAYS_AHEAD):
+        day = today + timedelta(days=offset)
+        hits = _fetch_amc_date(day)   # raises AMCKeyInactive on 401/403
+        if hits:
+            results[day.isoformat()] = hits
+    return results
+
+
+# ── Fandango scrape (fallback) ────────────────────────────────────────────────
+
+def fetch_all_showtimes_fandango() -> dict[str, list[dict]]:
     """
-    Returns a dict mapping movie title → list of showtime strings found
-    that match our target movies and IMAX 70mm format.
+    Scrape the Fandango Lincoln Square 13 theater page.
+    Fandango renders showtime data into the HTML for the next several days,
+    grouped by movie then by date. We walk the DOM looking for our target
+    movies and IMAX 70mm format rows.
     """
-    results: dict[str, list[str]] = {}
+    resp = requests.get(FANDANGO_URL, headers=FANDANGO_HEADERS, timeout=20)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    await page.goto(THEATER_SHOWTIMES_URL, wait_until="networkidle", timeout=60_000)
+    results: dict[str, list[dict]] = {}
+    today = date.today()
 
-    # Give any lazy-loaded content a moment
-    await page.wait_for_timeout(3000)
+    # Fandango groups showtimes under a movie section. Each section has:
+    #   - a heading/link with the movie title
+    #   - one or more date tabs, each containing format rows with time buttons
+    #
+    # We walk every element that contains our movie names, climb to the
+    # enclosing movie block, then extract date+format+time triples.
 
-    html = await page.content()
-    soup = BeautifulSoup(html, "html.parser")
+    # Map short Fandango date labels → ISO date strings.
+    def resolve_date(label: str) -> str | None:
+        label = label.strip().lower()
+        if label in ("today",):
+            return today.isoformat()
+        if label in ("tomorrow",):
+            return (today + timedelta(days=1)).isoformat()
+        # Try "Mon Apr 7", "April 7", "4/7" etc.
+        for fmt in ("%a %b %d", "%B %d", "%m/%d", "%b %d"):
+            try:
+                parsed = date.today().replace(
+                    **dict(zip(
+                        ["month", "day"],
+                        [int(x) for x in re.findall(r"\d+", label)][:2]
+                    ))
+                )
+                # Roll into next year if the date already passed this year
+                if parsed < today:
+                    parsed = parsed.replace(year=today.year + 1)
+                return parsed.isoformat()
+            except Exception:
+                continue
+        return None
 
-    # AMC renders movie cards; each has a title and format badges + showtime buttons.
-    # We look for any element containing our movie names, then walk up to find times.
-    # This is intentionally broad so it survives minor HTML tweaks.
+    # Find every movie container on the page
+    for movie_block in soup.find_all(True, recursive=True):
+        block_text = movie_block.get_text(" ", strip=True)
 
-    found_any_target = False
-
-    # Strategy 1: look for movie title headings then find sibling/child showtime data
-    for heading in soup.find_all(["h2", "h3", "h4", "span", "a"]):
-        text = heading.get_text(strip=True)
-        if not is_target_movie(text):
+        # Only consider blocks that mention our movies AND IMAX 70mm
+        if not is_target_movie(block_text):
+            continue
+        if TARGET_FORMAT not in block_text.lower():
+            continue
+        # Skip tiny fragments (must be a real container)
+        if len(block_text) < 50:
             continue
 
-        found_any_target = True
-        movie_title = text
-
-        # Walk up to a container that likely holds format + showtimes
-        container = heading
-        for _ in range(6):
-            container = container.parent
-            if container is None:
+        movie_title = ""
+        for tag in movie_block.find_all(["h2", "h3", "h4", "a"]):
+            t = tag.get_text(strip=True)
+            if is_target_movie(t) and len(t) < 60:
+                movie_title = t
                 break
-            container_text = container.get_text(" ", strip=True).lower()
-            if "70mm" in container_text or "imax" in container_text:
-                break
-
-        if container is None:
+        if not movie_title:
             continue
 
-        # Collect showtime buttons / time strings within this container
-        times: list[str] = []
-        for el in container.find_all(["a", "button", "span"]):
-            el_text = el.get_text(strip=True)
-            # Showtime buttons look like "7:00pm", "10:30am", etc.
-            if len(el_text) <= 10 and (
-                "am" in el_text.lower() or "pm" in el_text.lower()
-            ):
-                times.append(el_text)
+        # Walk child elements looking for date labels and time buttons
+        current_date_str: str | None = None
+        for el in movie_block.descendants:
+            if not hasattr(el, "get_text"):
+                continue
+            text = el.get_text(strip=True)
+            if not text:
+                continue
 
-        # Check format label within container
-        container_str = container.get_text(" ", strip=True)
-        if is_imax_70mm(container_str) or not times:
-            # Store even if empty — presence of the card matters
-            key = movie_title
-            if key not in results:
-                results[key] = []
-            results[key].extend(times)
+            # Date label candidates: short text with day/month info
+            if len(text) < 20 and re.search(r"(today|tomorrow|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}/\d{1,2})", text, re.I):
+                resolved = resolve_date(text)
+                if resolved:
+                    current_date_str = resolved
 
-    # Strategy 2: broader text scan if nothing found yet
-    if not found_any_target:
-        body_text = soup.get_text(" ", strip=True)
-        for movie in MOVIES:
-            if movie in body_text.lower():
-                results[movie.title()] = results.get(movie.title(), [])
+            # IMAX 70mm format label resets our date context check
+            if TARGET_FORMAT in text.lower():
+                pass  # keep current_date_str, times follow below
 
-    # Deduplicate times
-    return {k: sorted(set(v)) for k, v in results.items()}
+            # Time buttons: "7:00pm", "10:30am"
+            if current_date_str and re.fullmatch(r"\d{1,2}:\d{2}[ap]m", text, re.I):
+                day_results = results.setdefault(current_date_str, [])
+                entry = {
+                    "movie":    movie_title,
+                    "date":     current_date_str,
+                    "time":     text,
+                    "format":   "IMAX 70mm",
+                    "purchase": "",
+                    "source":   "fandango",
+                }
+                if entry not in day_results:
+                    day_results.append(entry)
+
+    return results
+
+
+# ── Unified fetch ─────────────────────────────────────────────────────────────
+
+def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
+    """
+    Try AMC API first. On 401/403, fall back to Fandango.
+    Returns (results, source) where source is 'amc-api' or 'fandango'.
+    """
+    try:
+        results = fetch_all_showtimes_amc()
+        return results, "amc-api"
+    except AMCKeyInactive as e:
+        log.warning(f"{e} — falling back to Fandango scrape")
+        results = fetch_all_showtimes_fandango()
+        return results, "fandango"
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-async def run() -> None:
+def main() -> None:
     log.info("=" * 60)
     log.info("IMAX 70mm monitor starting up")
-    log.info(f"Watching: {', '.join(m.title() for m in MOVIES)}")
-    log.info(f"Theater:  AMC Lincoln Square 13")
+    log.info(f"Theatre:  AMC Lincoln Square 13 (ID {THEATRE_ID})")
+    log.info(f"Watching: Dune, The Odyssey — IMAX 70mm")
+    log.info(f"Window:   next {DAYS_AHEAD} days")
     log.info(f"Interval: {CHECK_INTERVAL}s")
-    log.info(f"Log file: {LOG_FILE}")
-    log.info(f"Email alerts → {ALERT_EMAIL}" if GMAIL_USER else "Email alerts → DISABLED (set GMAIL_USER + GMAIL_APP_PASSWORD)")
+    log.info(f"Email:    {ALERT_EMAIL}" if GMAIL_USER else "Email:    DISABLED")
     log.info("=" * 60)
 
     state = load_state()
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
-        page = await context.new_page()
+    while True:
+        log.info(f"Checking next {DAYS_AHEAD} days...")
+        try:
+            current, source = fetch_all_showtimes()
+            log.info(f"Source: {source}")
 
-        while True:
-            try:
-                log.info("Checking AMC Lincoln Square 13 showtimes...")
-                showtimes = await fetch_showtimes(page)
+            if current != state:
+                changes: list[str] = []
 
-                if showtimes:
-                    log.info(f"Found target movies on page: {list(showtimes.keys())}")
+                for day, hits in current.items():
+                    prev_hits = state.get(day, [])
+                    new_hits = [h for h in hits if h not in prev_hits]
+                    for h in new_hits:
+                        line = f"NEW: {h['movie']} — {h['date']} {h['time']} [{h['format']}]"
+                        if h["purchase"]:
+                            line += f"\nBuy: {h['purchase']}"
+                        changes.append(line)
+
+                for day in state:
+                    if day not in current:
+                        for h in state[day]:
+                            changes.append(f"REMOVED: {h['movie']} — {day} {h['time']}")
+
+                if changes:
+                    summary = "\n\n".join(changes)
+                    log.info(f"CHANGE DETECTED:\n{summary}")
+                    alert("IMAX 70mm Alert — AMC Lincoln Square 13", summary)
                 else:
-                    log.info("No target movies found on page yet.")
+                    log.info("State changed (no net new showtimes).")
 
-                # Compare to last known state
-                if showtimes != state:
-                    changes: list[str] = []
+                state = current
+                save_state(state)
+            else:
+                found = sum(len(v) for v in current.values())
+                log.info(f"No change. ({found} target showtimes on record)")
 
-                    # New movies appeared
-                    for title, times in showtimes.items():
-                        if title not in state:
-                            changes.append(
-                                f"NEW: {title} appeared"
-                                + (f" — {', '.join(times)}" if times else " (no times yet)")
-                            )
-                        elif times != state[title]:
-                            added = sorted(set(times) - set(state.get(title, [])))
-                            removed = sorted(set(state.get(title, [])) - set(times))
-                            if added:
-                                changes.append(f"{title}: added times {', '.join(added)}")
-                            if removed:
-                                changes.append(f"{title}: removed times {', '.join(removed)}")
+        except Exception as e:
+            log.error(f"Unexpected error: {e}")
 
-                    # Movies disappeared
-                    for title in state:
-                        if title not in showtimes:
-                            changes.append(f"{title}: disappeared from page")
-
-                    if changes:
-                        summary = "\n".join(changes)
-                        log.info(f"CHANGE DETECTED:\n{summary}")
-                        alert("IMAX 70mm Alert — AMC Lincoln Square 13", summary)
-
-                    state = showtimes
-                    save_state(state)
-                else:
-                    log.info("No change.")
-
-            except Exception as e:
-                log.error(f"Error during check: {e}")
-
-            await asyncio.sleep(CHECK_INTERVAL)
+        time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()

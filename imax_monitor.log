@@ -1,0 +1,19 @@
+2026-04-07 19:52:59  ============================================================
+2026-04-07 19:52:59  IMAX 70mm monitor starting up
+2026-04-07 19:52:59  Theatre:  AMC Lincoln Square 13 (ID 164)
+2026-04-07 19:52:59  Watching: Dune, The Odyssey — IMAX 70mm
+2026-04-07 19:52:59  Window:   next 30 days
+2026-04-07 19:52:59  Interval: 60s
+2026-04-07 19:52:59  Email:    henry10greene@gmail.com
+2026-04-07 19:52:59  ============================================================
+2026-04-07 19:52:59  Checking next 30 days...
+2026-04-07 19:53:00  HTTP 403 for 2026-04-07: {"errors":[{"id":"080c796f-1f70-4e76-9bb5-91cbfbdfd38b","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:00  HTTP 403 for 2026-04-08: {"errors":[{"id":"1cf318cd-9dd5-4742-9c31-3f6e4887261c","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:00  HTTP 403 for 2026-04-09: {"errors":[{"id":"0e73f979-ec26-46c7-832e-337df2a7eea7","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:01  HTTP 403 for 2026-04-10: {"errors":[{"id":"34690831-bf4b-414c-9988-8b9ffb2d5c65","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:01  HTTP 403 for 2026-04-11: {"errors":[{"id":"dbdfae77-507b-435d-852d-267f38fc30cc","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:04  HTTP 403 for 2026-04-12: {"errors":[{"id":"c9b725a3-9f0a-45eb-88a3-44fc75cf9581","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:04  HTTP 403 for 2026-04-13: {"errors":[{"id":"8a89a76a-3065-43b9-9e2e-01ea42960dc0","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:05  HTTP 403 for 2026-04-14: {"errors":[{"id":"3dd46a6c-e9e2-4b50-82ef-bd7841dc7a72","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:05  HTTP 403 for 2026-04-15: {"errors":[{"id":"5c2a76c9-3995-4f10-9e20-d7038f65bca5","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 19:53:05  HTTP 403 for 2026-04-16: {"errors":[{"id":"301d1bb9-8ba6-496b-8f83-b59456fb1b08","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
