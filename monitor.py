@@ -21,6 +21,7 @@ import smtplib
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -297,18 +298,49 @@ def fetch_all_showtimes_fandango() -> dict[str, list[dict]]:
 
 # ── Unified fetch ─────────────────────────────────────────────────────────────
 
+def _sort_hit_key(hit: dict) -> tuple[str, str, str, str]:
+    return (
+        str(hit.get("movie", "")).lower(),
+        str(hit.get("time", "")),
+        str(hit.get("source", "")),
+        str(hit.get("purchase", "")),
+    )
+
+
 def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
     """
-    Try AMC API first. On 401/403, fall back to Fandango.
-    Returns (results, source) where source is 'amc-api' or 'fandango'.
+    Check AMC API and Fandango every cycle.
+    Returns merged results plus a comma-separated list of sources that succeeded.
     """
-    try:
-        results = fetch_all_showtimes_amc()
-        return results, "amc-api"
-    except AMCKeyInactive as e:
-        log.warning(f"{e} — falling back to Fandango scrape")
-        results = fetch_all_showtimes_fandango()
-        return results, "fandango"
+    fetchers = {
+        "amc-api": fetch_all_showtimes_amc,
+        "fandango": fetch_all_showtimes_fandango,
+    }
+    source_results: dict[str, dict[str, list[dict]]] = {}
+
+    with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
+        futures = {name: executor.submit(fetcher) for name, fetcher in fetchers.items()}
+        for name, future in futures.items():
+            try:
+                source_results[name] = future.result()
+            except AMCKeyInactive as e:
+                log.warning(f"{e} — AMC source unavailable this cycle")
+            except Exception as e:
+                log.error(f"{name} fetch failed: {e}")
+
+    if not source_results:
+        raise RuntimeError("All showtime sources failed this cycle")
+
+    merged: dict[str, list[dict]] = {}
+    for name in ("amc-api", "fandango"):
+        results = source_results.get(name)
+        if not results:
+            continue
+        for day in sorted(results):
+            day_results = merged.setdefault(day, [])
+            day_results.extend(sorted(results[day], key=_sort_hit_key))
+
+    return merged, ", ".join(source_results)
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
