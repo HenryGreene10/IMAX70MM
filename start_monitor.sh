@@ -16,7 +16,7 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-nohup python3 "$SCRIPT_DIR/monitor.py" >> "$LOG_FILE" 2>&1 &
+nohup python3 "$SCRIPT_DIR/monitor.py" >/dev/null 2>&1 &
 PID=$!
 echo $PID > "$PID_FILE"
 echo "Monitor started (PID $PID). Tailing log — Ctrl+C to stop tailing (monitor keeps running)."

@@ -21,7 +21,7 @@ import smtplib
 import subprocess
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -143,11 +143,14 @@ def is_target_format(attrs: list[str]) -> bool:
 
 # ── AMC API (primary) ─────────────────────────────────────────────────────────
 
-def _fetch_amc_date(day: date) -> list[dict]:
+def _fetch_amc_date(day: date) -> list[dict] | None:
     url = f"{API_BASE}/theatres/{THEATRE_ID}/showtimes/{day.isoformat()}"
     resp = requests.get(url, headers=AMC_HEADERS, timeout=15)
     if resp.status_code in (401, 403):
         raise AMCKeyInactive(f"AMC API returned {resp.status_code} — key not active yet")
+    if resp.status_code == 404:
+        # AMC stops returning data once we scan beyond its published schedule window.
+        return None
     resp.raise_for_status()
 
     hits = []
@@ -173,6 +176,10 @@ def fetch_all_showtimes_amc() -> dict[str, list[dict]]:
     for offset in range(DAYS_AHEAD):
         day = today + timedelta(days=offset)
         hits = _fetch_amc_date(day)   # raises AMCKeyInactive on 401/403
+        if hits is None:
+            last_published = day - timedelta(days=1)
+            log.info(f"AMC schedule currently published through {last_published.isoformat()}; stopping AMC scan early")
+            break
         if hits:
             results[day.isoformat()] = hits
     return results
@@ -203,25 +210,30 @@ def fetch_all_showtimes_fandango() -> dict[str, list[dict]]:
 
     # Map short Fandango date labels → ISO date strings.
     def resolve_date(label: str) -> str | None:
-        label = label.strip().lower()
-        if label in ("today",):
+        normalized = re.sub(r"\s+", " ", label.strip())
+        lowered = normalized.lower()
+        if lowered == "today":
             return today.isoformat()
-        if label in ("tomorrow",):
+        if lowered == "tomorrow":
             return (today + timedelta(days=1)).isoformat()
+        cleaned = normalized.replace(",", "")
         # Try "Mon Apr 7", "April 7", "4/7" etc.
-        for fmt in ("%a %b %d", "%B %d", "%m/%d", "%b %d"):
+        for fmt in (
+            "%a %b %d",
+            "%A %b %d",
+            "%a %B %d",
+            "%A %B %d",
+            "%B %d",
+            "%b %d",
+            "%m/%d",
+        ):
             try:
-                parsed = date.today().replace(
-                    **dict(zip(
-                        ["month", "day"],
-                        [int(x) for x in re.findall(r"\d+", label)][:2]
-                    ))
-                )
+                parsed = datetime.strptime(cleaned, fmt).date().replace(year=today.year)
                 # Roll into next year if the date already passed this year
                 if parsed < today:
                     parsed = parsed.replace(year=today.year + 1)
                 return parsed.isoformat()
-            except Exception:
+            except ValueError:
                 continue
         return None
 
