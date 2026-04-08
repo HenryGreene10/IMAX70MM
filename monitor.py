@@ -12,6 +12,7 @@ Required env vars:
   ALERT_EMAIL        — recipient (defaults to henry10greene@gmail.com)
 """
 
+import argparse
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ALERT_EMAIL     = os.environ.get("ALERT_EMAIL", "henry10greene@gmail.com")
 
 THEATRE_ID      = 164          # AMC Lincoln Square 13
-DAYS_AHEAD      = 30
+DAYS_AHEAD      = 365
 CHECK_INTERVAL  = 60           # seconds
 
 TARGET_MOVIES   = ["dune", "odyssey"]
@@ -353,5 +354,41 @@ def main() -> None:
         time.sleep(CHECK_INTERVAL)
 
 
+def test_mode() -> None:
+    """Send one real alert email with a fake showtime and exit."""
+    log.info("TEST MODE — sending one fake alert and exiting")
+
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    fake = {
+        "movie":    "Dune: Part Three",
+        "date":     tomorrow,
+        "time":     "7:00pm",
+        "format":   "IMAX 70mm",
+        "purchase": "https://www.amctheatres.com/movies/dune-part-three",
+        "source":   "test",
+    }
+
+    title   = "IMAX 70mm Alert — AMC Lincoln Square 13"
+    body    = (
+        f"NEW: {fake['movie']} — {fake['date']} {fake['time']} [{fake['format']}]\n"
+        f"Buy: {fake['purchase']}\n\n"
+        f"(This is a test alert — no real tickets on sale yet)"
+    )
+
+    log.info(f"Alert title: {title}")
+    log.info(f"Alert body:\n{body}")
+
+    notify_desktop(title, body)
+    notify_email(f"[IMAX Alert] {title}", body)
+    log.info("Done. Check henry10greene@gmail.com.")
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true", help="Send a fake alert email and exit")
+    args = parser.parse_args()
+
+    if args.test:
+        test_mode()
+    else:
+        main()

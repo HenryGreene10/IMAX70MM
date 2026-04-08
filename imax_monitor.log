@@ -17,3 +17,12 @@
 2026-04-07 19:53:05  HTTP 403 for 2026-04-14: {"errors":[{"id":"3dd46a6c-e9e2-4b50-82ef-bd7841dc7a72","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
 2026-04-07 19:53:05  HTTP 403 for 2026-04-15: {"errors":[{"id":"5c2a76c9-3995-4f10-9e20-d7038f65bca5","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
 2026-04-07 19:53:05  HTTP 403 for 2026-04-16: {"errors":[{"id":"301d1bb9-8ba6-496b-8f83-b59456fb1b08","code":12005,"exceptionMessage":"Unauthorized VendorKey."}]}
+2026-04-07 20:09:13  TEST MODE — sending one fake alert and exiting
+2026-04-07 20:09:13  Alert title: IMAX 70mm Alert — AMC Lincoln Square 13
+2026-04-07 20:09:13  Alert body:
+NEW: Dune: Part Three — 2026-04-08 7:00pm [IMAX 70mm]
+Buy: https://www.amctheatres.com/movies/dune-part-three
+
+(This is a test alert — no real tickets on sale yet)
+2026-04-07 20:09:14  Email alert sent to henry10greene@gmail.com
+2026-04-07 20:09:14  Done. Check henry10greene@gmail.com.
