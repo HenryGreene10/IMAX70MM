@@ -28,6 +28,7 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,8 @@ AMC_HEADERS     = {"X-AMC-Vendor-Key": AMC_API_KEY}
 
 AMC_COOLDOWN_SECS = 6 * 3600   # seconds between AMC retries after a 403
 _amc_cooldown_until: float = 0.0
+
+AMC_WEB_URL     = "https://www.amctheatres.com/movie-theatres/new-york/amc-lincoln-square-13/showtimes/all"
 
 FANDANGO_URL    = "https://www.fandango.com/amc-lincoln-square-13-aabqi/theater-page"
 FANDANGO_HEADERS = {
@@ -189,6 +192,90 @@ def fetch_all_showtimes_amc() -> dict[str, list[dict]]:
     return results
 
 
+# ── AMC web scrape (Playwright) ──────────────────────────────────────────────
+
+def fetch_all_showtimes_amc_web() -> dict[str, list[dict]]:
+    """Scrape AMC's theater page using a real browser to bypass Cloudflare."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.goto(AMC_WEB_URL, wait_until="networkidle", timeout=45000)
+        html = page.content()
+        browser.close()
+
+    soup = BeautifulSoup(html, "html.parser")
+    results: dict[str, list[dict]] = {}
+    today = date.today()
+
+    for movie_block in soup.find_all(True, recursive=True):
+        block_text = movie_block.get_text(" ", strip=True)
+        if not is_target_movie(block_text):
+            continue
+        if TARGET_FORMAT not in block_text.lower():
+            continue
+        if len(block_text) < 50:
+            continue
+
+        movie_title = ""
+        for tag in movie_block.find_all(["h2", "h3", "h4", "a"]):
+            t = tag.get_text(strip=True)
+            if is_target_movie(t) and len(t) < 60:
+                movie_title = t
+                break
+        if not movie_title:
+            continue
+
+        current_date_str: str | None = None
+        for el in movie_block.descendants:
+            if not hasattr(el, "get_text"):
+                continue
+            text = el.get_text(strip=True)
+            if not text:
+                continue
+
+            if len(text) < 20 and re.search(
+                r"(today|tomorrow|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}/\d{1,2})",
+                text, re.I,
+            ):
+                try:
+                    normalized = re.sub(r"\s+", " ", text.strip()).replace(",", "")
+                    lowered = normalized.lower()
+                    if lowered == "today":
+                        current_date_str = today.isoformat()
+                    elif lowered == "tomorrow":
+                        current_date_str = (today + timedelta(days=1)).isoformat()
+                    else:
+                        for fmt in ("%a %b %d", "%A %b %d", "%a %B %d", "%A %B %d", "%B %d", "%b %d", "%m/%d"):
+                            try:
+                                parsed = datetime.strptime(normalized, fmt).date().replace(year=today.year)
+                                if parsed < today:
+                                    parsed = parsed.replace(year=today.year + 1)
+                                current_date_str = parsed.isoformat()
+                                break
+                            except ValueError:
+                                continue
+                except Exception:
+                    pass
+
+            if current_date_str and re.fullmatch(r"\d{1,2}:\d{2}[ap]m", text, re.I):
+                day_results = results.setdefault(current_date_str, [])
+                entry = {
+                    "movie":    movie_title,
+                    "date":     current_date_str,
+                    "time":     text,
+                    "format":   "IMAX 70mm",
+                    "purchase": AMC_WEB_URL,
+                    "source":   "amc-web",
+                }
+                if entry not in day_results:
+                    day_results.append(entry)
+
+    return results
+
+
 # ── Fandango scrape (fallback) ────────────────────────────────────────────────
 
 def fetch_all_showtimes_fandango() -> dict[str, list[dict]]:
@@ -317,7 +404,10 @@ def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
     """
     global _amc_cooldown_until
 
-    fetchers: dict[str, object] = {"fandango": fetch_all_showtimes_fandango}
+    fetchers: dict[str, object] = {
+        "fandango": fetch_all_showtimes_fandango,
+        "amc-web":  fetch_all_showtimes_amc_web,
+    }
     now = time.time()
     if now >= _amc_cooldown_until:
         fetchers["amc-api"] = fetch_all_showtimes_amc
