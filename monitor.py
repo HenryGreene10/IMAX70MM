@@ -46,6 +46,9 @@ TARGET_FORMAT   = "imax 70mm"
 API_BASE        = "https://api.amctheatres.com/v2"
 AMC_HEADERS     = {"X-AMC-Vendor-Key": AMC_API_KEY}
 
+AMC_COOLDOWN_SECS = 6 * 3600   # seconds between AMC retries after a 403
+_amc_cooldown_until: float = 0.0
+
 FANDANGO_URL    = "https://www.fandango.com/amc-lincoln-square-13-aabqi/theater-page"
 FANDANGO_HEADERS = {
     "User-Agent": (
@@ -312,10 +315,13 @@ def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
     Check AMC API and Fandango every cycle.
     Returns merged results plus a comma-separated list of sources that succeeded.
     """
-    fetchers = {
-        "amc-api": fetch_all_showtimes_amc,
-        "fandango": fetch_all_showtimes_fandango,
-    }
+    global _amc_cooldown_until
+
+    fetchers: dict[str, object] = {"fandango": fetch_all_showtimes_fandango}
+    now = time.time()
+    if now >= _amc_cooldown_until:
+        fetchers["amc-api"] = fetch_all_showtimes_amc
+
     source_results: dict[str, dict[str, list[dict]]] = {}
 
     with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
@@ -324,7 +330,9 @@ def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
             try:
                 source_results[name] = future.result()
             except AMCKeyInactive as e:
-                log.warning(f"{e} — AMC source unavailable this cycle")
+                _amc_cooldown_until = time.time() + AMC_COOLDOWN_SECS
+                retry_at = datetime.fromtimestamp(_amc_cooldown_until).strftime("%H:%M")
+                log.warning(f"{e} — will retry AMC at {retry_at} ({AMC_COOLDOWN_SECS//3600}h cooldown)")
             except Exception as e:
                 log.error(f"{name} fetch failed: {e}")
 
