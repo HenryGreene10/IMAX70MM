@@ -6,10 +6,13 @@ Fallback: Fandango theater page scrape (used until AMC key activates)
 Switches automatically — no code change needed when the key goes live.
 
 Required env vars:
-  AMC_API_KEY        — your AMC vendor key
-  GMAIL_USER         — Gmail address used to send alerts
-  GMAIL_APP_PASSWORD — Gmail App Password
-  ALERT_EMAIL        — recipient (defaults to henry10greene@gmail.com)
+  AMC_API_KEY    — your AMC vendor key
+  RESEND_API_KEY — Resend API key used to send alerts (https://resend.com)
+  ALERT_EMAIL    — recipient (defaults to henry10greene@gmail.com)
+
+Email is sent via Resend's HTTPS API rather than raw SMTP: most cloud
+hosts (Railway included) have outbound SMTP to Gmail blocked at the
+network level as an anti-spam measure, which silently drops alerts.
 """
 
 import argparse
@@ -18,13 +21,11 @@ import logging
 import os
 import re
 import signal
-import smtplib
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
@@ -41,8 +42,8 @@ if hasattr(signal, "SIGCHLD"):
 # ── Config ────────────────────────────────────────────────────────────────────
 
 AMC_API_KEY     = os.environ["AMC_API_KEY"]
-GMAIL_USER      = os.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+RESEND_API_KEY  = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM     = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
 ALERT_EMAIL     = os.environ.get("ALERT_EMAIL", "henry10greene@gmail.com")
 
 THEATRE_ID      = 2116         # AMC Lincoln Square 13 (AMC's IDs shifted — 164 is now Village On The Parkway 9, TX)
@@ -103,19 +104,22 @@ def notify_desktop(title: str, body: str) -> None:
 
 
 def notify_email(subject: str, body: str) -> None:
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        log.warning("Email credentials not configured — skipping email alert.")
+    if not RESEND_API_KEY:
+        log.warning("RESEND_API_KEY not configured — skipping email alert.")
         return
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"]    = GMAIL_USER
-        msg["To"]      = ALERT_EMAIL
-        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            smtp.sendmail(GMAIL_USER, ALERT_EMAIL, msg.as_string())
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from":    RESEND_FROM,
+                "to":      [ALERT_EMAIL],
+                "subject": subject,
+                "text":    body,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
         log.info(f"Email alert sent to {ALERT_EMAIL}")
     except Exception as e:
         log.error(f"Failed to send email: {e}")
@@ -466,7 +470,7 @@ def main() -> None:
     log.info(f"Watching: Dune, The Odyssey — IMAX 70mm")
     log.info(f"Window:   next {DAYS_AHEAD} days")
     log.info(f"Interval: {CHECK_INTERVAL}s")
-    log.info(f"Email:    {ALERT_EMAIL}" if GMAIL_USER else "Email:    DISABLED")
+    log.info(f"Email:    {ALERT_EMAIL}" if RESEND_API_KEY else "Email:    DISABLED")
     log.info("=" * 60)
 
     state = load_state()
