@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import signal
 import smtplib
 import subprocess
 import sys
@@ -30,6 +31,13 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+# Running as PID 1 in the container: orphaned grandchild processes (e.g. a
+# Playwright browser subprocess left behind after a failed launch) get
+# reparented to us and would sit as zombies forever without an init process
+# to reap them. Auto-reap so a bad cycle can't slowly exhaust the PID limit.
+if hasattr(signal, "SIGCHLD"):
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 AMC_API_KEY     = os.environ["AMC_API_KEY"]
@@ -37,7 +45,7 @@ GMAIL_USER      = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ALERT_EMAIL     = os.environ.get("ALERT_EMAIL", "henry10greene@gmail.com")
 
-THEATRE_ID      = 164          # AMC Lincoln Square 13
+THEATRE_ID      = 2116         # AMC Lincoln Square 13 (AMC's IDs shifted — 164 is now Village On The Parkway 9, TX)
 DAYS_AHEAD      = 365
 CHECK_INTERVAL  = 60           # seconds
 
@@ -163,13 +171,15 @@ def _fetch_amc_date(day: date) -> list[dict] | None:
     hits = []
     for st in resp.json().get("_embedded", {}).get("showtimes", []):
         movie_name = st.get("movieName", "") or st.get("name", "")
-        attributes = st.get("attributes", [])
-        if is_target_movie(movie_name) and is_target_format(attributes):
+        # AMC now returns attributes as objects ({"code", "name", ...}), not
+        # plain strings — pull the human-readable label out of each one.
+        attr_labels = [a.get("name") or a.get("code") or "" for a in st.get("attributes", [])]
+        if is_target_movie(movie_name) and is_target_format(attr_labels):
             hits.append({
                 "movie":    movie_name,
                 "date":     day.isoformat(),
                 "time":     st.get("showDateTime", st.get("showDateTimeUtc", "")),
-                "format":   ", ".join(attributes),
+                "format":   ", ".join(attr_labels),
                 "purchase": st.get("purchaseUrl", ""),
                 "source":   "amc-api",
             })
@@ -399,20 +409,27 @@ def _sort_hit_key(hit: dict) -> tuple[str, str, str, str]:
 
 def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
     """
-    Check AMC API and Fandango every cycle.
+    Check AMC API, Fandango, and the AMC web scrape every cycle.
     Returns merged results plus a comma-separated list of sources that succeeded.
     """
     global _amc_cooldown_until
 
+    # Playwright's sync API is thread-affine (it's greenlet-based), so it
+    # cannot run inside a ThreadPoolExecutor worker thread — doing so silently
+    # orphans the browser subprocess it launches. Run it on the main thread,
+    # sequentially, separate from the requests-based fetchers below.
+    source_results: dict[str, dict[str, list[dict]]] = {}
+    try:
+        source_results["amc-web"] = fetch_all_showtimes_amc_web()
+    except Exception as e:
+        log.error(f"amc-web fetch failed: {e}")
+
     fetchers: dict[str, object] = {
         "fandango": fetch_all_showtimes_fandango,
-        "amc-web":  fetch_all_showtimes_amc_web,
     }
     now = time.time()
     if now >= _amc_cooldown_until:
         fetchers["amc-api"] = fetch_all_showtimes_amc
-
-    source_results: dict[str, dict[str, list[dict]]] = {}
 
     with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
         futures = {name: executor.submit(fetcher) for name, fetcher in fetchers.items()}
@@ -430,7 +447,7 @@ def fetch_all_showtimes() -> tuple[dict[str, list[dict]], str]:
         raise RuntimeError("All showtime sources failed this cycle")
 
     merged: dict[str, list[dict]] = {}
-    for name in ("amc-api", "fandango"):
+    for name in ("amc-api", "fandango", "amc-web"):
         results = source_results.get(name)
         if not results:
             continue
