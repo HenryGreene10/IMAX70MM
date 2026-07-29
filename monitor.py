@@ -179,10 +179,18 @@ def _fetch_amc_date(day: date) -> list[dict] | None:
         # plain strings — pull the human-readable label out of each one.
         attr_labels = [a.get("name") or a.get("code") or "" for a in st.get("attributes", [])]
         if is_target_movie(movie_name) and is_target_format(attr_labels):
+            # showDateTimeUtc is UTC — showing that in the alert made you do
+            # timezone math against a 5-minute sellout window. showDateTimeLocal
+            # is already the theatre's local wall-clock time; use that instead.
+            time_label = st.get("showDateTimeLocal", "")
+            try:
+                time_label = datetime.fromisoformat(time_label).strftime("%-I:%M%p").lower()
+            except ValueError:
+                pass
             hits.append({
                 "movie":    movie_name,
                 "date":     day.isoformat(),
-                "time":     st.get("showDateTime", st.get("showDateTimeUtc", "")),
+                "time":     time_label,
                 "format":   ", ".join(attr_labels),
                 "purchase": st.get("purchaseUrl", ""),
                 "source":   "amc-api",
