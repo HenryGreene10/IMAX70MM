@@ -56,7 +56,7 @@ TARGET_FORMAT   = "imax 70mm"
 API_BASE        = "https://api.amctheatres.com/v2"
 AMC_HEADERS     = {"X-AMC-Vendor-Key": AMC_API_KEY}
 
-AMC_COOLDOWN_SECS = 6 * 3600   # seconds between AMC retries after a 403
+AMC_COOLDOWN_SECS = 10 * 60    # seconds between AMC retries after a 403 (short: key is confirmed valid, so a 403 now is almost always a transient rate-limit, not a dead key — a multi-hour blackout on the primary source is the wrong tradeoff)
 _amc_cooldown_until: float = 0.0
 
 AMC_WEB_URL     = "https://www.amctheatres.com/movie-theatres/new-york/amc-lincoln-square-13/showtimes/all"
